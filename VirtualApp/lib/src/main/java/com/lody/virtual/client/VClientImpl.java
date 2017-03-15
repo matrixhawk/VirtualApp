@@ -23,7 +23,7 @@ import android.os.Message;
 import android.os.Process;
 import android.os.StrictMode;
 
-import com.lody.virtual.IOHook;
+import com.lody.virtual.client.core.CrashHandler;
 import com.lody.virtual.client.core.PatchManager;
 import com.lody.virtual.client.core.VirtualCore;
 import com.lody.virtual.client.env.SpecialComponentList;
@@ -36,9 +36,10 @@ import com.lody.virtual.client.hook.secondary.ProxyServiceFactory;
 import com.lody.virtual.client.ipc.VActivityManager;
 import com.lody.virtual.client.ipc.VPackageManager;
 import com.lody.virtual.client.stub.StubManifest;
-import com.lody.virtual.helper.proto.PendingResultData;
 import com.lody.virtual.helper.utils.VLog;
+import com.lody.virtual.os.VEnvironment;
 import com.lody.virtual.os.VUserHandle;
+import com.lody.virtual.remote.PendingResultData;
 import com.lody.virtual.server.secondary.FakeIdentityBinder;
 
 import java.io.File;
@@ -82,6 +83,7 @@ public final class VClientImpl extends IVClient.Stub {
     private int vuid;
     private AppBindData mBoundApplication;
     private Application mInitialApplication;
+    private CrashHandler crashHandler;
 
     public static VClientImpl get() {
         return gClient;
@@ -97,6 +99,14 @@ public final class VClientImpl extends IVClient.Stub {
 
     public String getCurrentPackage() {
         return mBoundApplication != null ? mBoundApplication.appInfo.packageName : null;
+    }
+
+    public CrashHandler getCrashHandler() {
+        return crashHandler;
+    }
+
+    public void setCrashHandler(CrashHandler crashHandler) {
+        this.crashHandler = crashHandler;
     }
 
     public int getVUid() {
@@ -136,9 +146,6 @@ public final class VClientImpl extends IVClient.Stub {
     }
 
     public void initProcess(IBinder token, int vuid) {
-        if (this.token != null) {
-            throw new IllegalStateException("Token is exist!");
-        }
         this.token = token;
         this.vuid = vuid;
     }
@@ -228,9 +235,9 @@ public final class VClientImpl extends IVClient.Stub {
         if (StubManifest.ENABLE_IO_REDIRECT) {
             startIOUniformer();
         }
-        IOHook.hookNative();
+        NativeEngine.hookNative();
         Object mainThread = VirtualCore.mainThread();
-        IOHook.startDexOverride();
+        NativeEngine.startDexOverride();
         Context context = createPackageContext(data.appInfo.packageName);
         System.setProperty("java.io.tmpdir", context.getCacheDir().getAbsolutePath());
         File codeCacheDir;
@@ -332,9 +339,15 @@ public final class VClientImpl extends IVClient.Stub {
     @SuppressLint("SdCardPath")
     private void startIOUniformer() {
         ApplicationInfo info = mBoundApplication.appInfo;
-        IOHook.redirect("/data/data/" + info.packageName + "/", info.dataDir + "/");
-        IOHook.redirect("/data/user/0/" + info.packageName + "/", info.dataDir + "/");
-        IOHook.hook();
+        NativeEngine.redirect("/data/data/" + info.packageName + "/", info.dataDir + "/");
+        NativeEngine.redirect("/data/user/0/" + info.packageName + "/", info.dataDir + "/");
+        /*
+         *  /data/user/0/{Host-Pkg}/virtual/data/user/{user-id}/lib -> /data/user/0/{Host-Pkg}/virtual/data/app/{App-Pkg}/lib/
+         */
+        NativeEngine.redirect(
+                new File(VEnvironment.getUserSystemDirectory(VUserHandle.myUserId()).getAbsolutePath(), "lib").getAbsolutePath() + "/",
+                info.nativeLibraryDir + "/");
+        NativeEngine.hook();
     }
 
     private Context createPackageContext(String packageName) {
@@ -462,18 +475,22 @@ public final class VClientImpl extends IVClient.Stub {
     }
 
     @Override
-    public void scheduleReceiver(ComponentName component, Intent intent, PendingResultData resultData) {
+    public void scheduleReceiver(String processName, ComponentName component, Intent intent, PendingResultData resultData) {
         ReceiverData receiverData = new ReceiverData();
         receiverData.resultData = resultData;
         receiverData.intent = intent;
         receiverData.component = component;
+        receiverData.processName = processName;
         sendMessage(RECEIVER, receiverData);
     }
 
     private void handleReceiver(ReceiverData data) {
         BroadcastReceiver.PendingResult result = data.resultData.build();
         try {
-            Context context = createPackageContext(data.component.getPackageName());
+            if (!isBound()) {
+                bindApplication(data.component.getPackageName(), data.processName);
+            }
+            Context context = mInitialApplication.getBaseContext();
             Context receiverContext = ContextImpl.getReceiverRestrictedContext.call(context);
             String className = data.component.getClassName();
             BroadcastReceiver receiver = (BroadcastReceiver) context.getClassLoader().loadClass(className).newInstance();
@@ -506,14 +523,19 @@ public final class VClientImpl extends IVClient.Stub {
 
     private static class RootThreadGroup extends ThreadGroup {
 
-        public RootThreadGroup(ThreadGroup parent) {
+        RootThreadGroup(ThreadGroup parent) {
             super(parent, "VA-Root");
         }
 
         @Override
         public void uncaughtException(Thread t, Throwable e) {
-            VLog.e("uncaught", e);
-            System.exit(0);
+            CrashHandler handler = VClientImpl.gClient.crashHandler;
+            if (handler != null) {
+                handler.handleUncaughtException(t, e);
+            } else {
+                VLog.e("uncaught", e);
+                System.exit(0);
+            }
         }
     }
 
@@ -534,6 +556,7 @@ public final class VClientImpl extends IVClient.Stub {
         PendingResultData resultData;
         Intent intent;
         ComponentName component;
+        String processName;
     }
 
     private class H extends Handler {
