@@ -17,12 +17,14 @@ import com.lody.virtual.helper.compat.BundleCompat;
 import com.lody.virtual.server.accounts.VAccountManagerService;
 import com.lody.virtual.server.am.BroadcastSystem;
 import com.lody.virtual.server.am.VActivityManagerService;
+import com.lody.virtual.server.device.VDeviceManagerService;
 import com.lody.virtual.server.interfaces.IServiceFetcher;
 import com.lody.virtual.server.job.VJobSchedulerService;
 import com.lody.virtual.server.notification.VNotificationManagerService;
 import com.lody.virtual.server.pm.VAppManagerService;
 import com.lody.virtual.server.pm.VPackageManagerService;
 import com.lody.virtual.server.pm.VUserManagerService;
+import com.lody.virtual.server.vs.VirtualStorageService;
 
 /**
  * @author Lody
@@ -46,14 +48,16 @@ public final class BinderProvider extends ContentProvider {
         VAppManagerService.systemReady();
         addService(ServiceManagerNative.APP, VAppManagerService.get());
         BroadcastSystem.attach(VActivityManagerService.get(), VAppManagerService.get());
-        VAccountManagerService.systemReady();
-        addService(ServiceManagerNative.ACCOUNT, VAccountManagerService.get());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             addService(ServiceManagerNative.JOB, VJobSchedulerService.get());
         }
         VNotificationManagerService.systemReady(context);
         addService(ServiceManagerNative.NOTIFICATION, VNotificationManagerService.get());
         VAppManagerService.get().scanApps();
+        VAccountManagerService.systemReady();
+        addService(ServiceManagerNative.ACCOUNT, VAccountManagerService.get());
+        addService(ServiceManagerNative.VS, VirtualStorageService.get());
+        addService(ServiceManagerNative.DEVICE, VDeviceManagerService.get());
         return true;
     }
 
@@ -64,9 +68,12 @@ public final class BinderProvider extends ContentProvider {
 
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
-        Bundle bundle = new Bundle();
-        BundleCompat.putBinder(bundle, "_VA_|_binder_", mServiceFetcher);
-        return bundle;
+        if ("@".equals(method)) {
+            Bundle bundle = new Bundle();
+            BundleCompat.putBinder(bundle, "_VA_|_binder_", mServiceFetcher);
+            return bundle;
+        }
+        return null;
     }
 
     @Override

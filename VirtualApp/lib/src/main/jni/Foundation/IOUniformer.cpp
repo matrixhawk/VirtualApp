@@ -5,9 +5,66 @@
 #include "IOUniformer.h"
 #include "native_hook.h"
 
+static list<std::string> ReadOnlyPathMap;
 static std::map<std::string/*orig_path*/, std::string/*new_path*/> IORedirectMap;
 static std::map<std::string/*orig_path*/, std::string/*new_path*/> RootIORedirectMap;
 
+static struct {
+    const char *selfSoPath;
+    int api_level;
+    int preview_api_level;
+    bool hooked_process;
+} gVars;
+
+
+void IOUniformer::init_array() {
+    // TODO: init hook for child process
+//    if (!gVars.hooked_process) {
+//        gVars.selfSoPath = getenv("V_SELF_SO");;
+//        if (gVars.selfSoPath != NULL) {
+//            LOGE("start init child process, io.size = %i", IORedirectMap.size());
+//            gVars.api_level = atoi(getenv("V_API_LEVEL"));
+//            gVars.preview_api_level = atoi(getenv("V_PREVIEW_API_LEVEL"));
+//            startUniformer(gVars.api_level, gVars.preview_api_level);
+//        }
+//    }
+}
+
+void IOUniformer::saveEnvironment(const char *selfSoPath, int api_level, int preview_api_level) {
+    LOGE("Saving environment, so : %s, api: %i, io.size : %i.", selfSoPath, api_level,
+         IORedirectMap.size());
+    gVars.selfSoPath = selfSoPath;
+    gVars.api_level = api_level;
+    gVars.preview_api_level = preview_api_level;
+    char chars[5];
+    char envName[30];
+    char buffer[200];
+    setenv("V_SELF_SO", gVars.selfSoPath, 1);
+    sprintf(chars, "%i", api_level);
+    setenv("V_API_LEVEL", chars, 1);
+    memset(chars, sizeof(chars), 0);
+    sprintf(chars, "%i", preview_api_level);
+    setenv("V_PREVIEW_API_LEVEL", chars, 1);
+    std::map<std::string, std::string>::iterator iterator;
+    int i = 0;
+    for (iterator = IORedirectMap.begin(); iterator != IORedirectMap.end(); iterator++, i++) {
+        const std::string &prefix = iterator->first;
+        const std::string &new_prefix = iterator->second;
+        memset(envName, sizeof(envName), 0);
+        memset(buffer, sizeof(buffer), 0);
+        sprintf(envName, "V_IO_REDIRECT_%i", i);
+        sprintf(buffer, "%s&%s", prefix.c_str(), new_prefix.c_str());
+        setenv(envName, buffer, 1);
+    }
+    i = 0;
+    list<std::string>::iterator it;
+    for (it = ReadOnlyPathMap.begin(); it != ReadOnlyPathMap.end(); it++, i++) {
+        memset(envName, sizeof(envName), 0);
+        memset(buffer, sizeof(buffer), 0);
+        sprintf(envName, "V_IO_RO_%i", i);
+        setenv(envName, it->c_str(), 1);
+    }
+}
 
 /**
  *
@@ -57,9 +114,6 @@ static void add_pair(const char *_orig_path, const char *_new_path) {
 
 
 const char *match_redirected_path(const char *_path) {
-    if (_path == NULL) {
-        return NULL;
-    }
     std::string path(_path);
     if (path.length() <= 1) {
         return _path;
@@ -83,12 +137,28 @@ const char *match_redirected_path(const char *_path) {
 
 
 void IOUniformer::redirect(const char *orig_path, const char *new_path) {
-    LOGI("Start redirect : from %s to %s", orig_path, new_path);
+    LOGI("Start Java_nativeRedirect : from %s to %s", orig_path, new_path);
     add_pair(orig_path, new_path);
 }
 
 const char *IOUniformer::query(const char *orig_path) {
     return match_redirected_path(orig_path);
+}
+
+void IOUniformer::readOnly(const char *_path) {
+    std::string path(_path);
+    ReadOnlyPathMap.push_back(path);
+}
+
+bool isReadOnlyPath(const char *_path) {
+    std::string path(_path);
+    list<std::string>::iterator it;
+    for (it = ReadOnlyPathMap.begin(); it != ReadOnlyPathMap.end(); ++it) {
+        if (startWith(path, *it)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 
@@ -141,6 +211,9 @@ HOOK_DEF(int, faccessat, int dirfd, const char *pathname, int mode, int flags) {
 // int fchmodat(int dirfd, const char *pathname, mode_t mode, int flags);
 HOOK_DEF(int, fchmodat, int dirfd, const char *pathname, mode_t mode, int flags) {
     const char *redirect_path = match_redirected_path(pathname);
+    if (isReadOnlyPath(redirect_path)) {
+        return -1;
+    }
     int ret = syscall(__NR_fchmodat, dirfd, redirect_path, mode, flags);
     FREE(redirect_path, pathname);
     return ret;
@@ -148,6 +221,9 @@ HOOK_DEF(int, fchmodat, int dirfd, const char *pathname, mode_t mode, int flags)
 // int fchmod(const char *pathname, mode_t mode);
 HOOK_DEF(int, fchmod, const char *pathname, mode_t mode) {
     const char *redirect_path = match_redirected_path(pathname);
+    if (isReadOnlyPath(redirect_path)) {
+        return -1;
+    }
     int ret = syscall(__NR_chmod, redirect_path, mode);
     FREE(redirect_path, pathname);
     return ret;
@@ -199,6 +275,9 @@ HOOK_DEF(int, utimensat, int dirfd, const char *pathname, const struct timespec 
 // int fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flags);
 HOOK_DEF(int, fchownat, int dirfd, const char *pathname, uid_t owner, gid_t group, int flags) {
     const char *redirect_path = match_redirected_path(pathname);
+    if (isReadOnlyPath(redirect_path)) {
+        return -1;
+    }
     int ret = syscall(__NR_fchownat, dirfd, redirect_path, owner, group, flags);
     FREE(redirect_path, pathname);
     return ret;
@@ -217,6 +296,9 @@ HOOK_DEF(int, chroot, const char *pathname) {
 HOOK_DEF(int, renameat, int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
     const char *redirect_path_old = match_redirected_path(oldpath);
     const char *redirect_path_new = match_redirected_path(newpath);
+    if (isReadOnlyPath(redirect_path_old) || isReadOnlyPath(redirect_path_new)) {
+        return -1;
+    }
     int ret = syscall(__NR_renameat, olddirfd, redirect_path_old, newdirfd, redirect_path_new);
     FREE(redirect_path_old, oldpath);
     FREE(redirect_path_new, newpath);
@@ -226,6 +308,9 @@ HOOK_DEF(int, renameat, int olddirfd, const char *oldpath, int newdirfd, const c
 HOOK_DEF(int, rename, const char *oldpath, const char *newpath) {
     const char *redirect_path_old = match_redirected_path(oldpath);
     const char *redirect_path_new = match_redirected_path(newpath);
+    if (isReadOnlyPath(redirect_path_old) || isReadOnlyPath(redirect_path_new)) {
+        return -1;
+    }
     int ret = syscall(__NR_rename, redirect_path_old, redirect_path_new);
     FREE(redirect_path_old, oldpath);
     FREE(redirect_path_new, newpath);
@@ -236,6 +321,9 @@ HOOK_DEF(int, rename, const char *oldpath, const char *newpath) {
 // int unlinkat(int dirfd, const char *pathname, int flags);
 HOOK_DEF(int, unlinkat, int dirfd, const char *pathname, int flags) {
     const char *redirect_path = match_redirected_path(pathname);
+    if (isReadOnlyPath(redirect_path)) {
+        return -1;
+    }
     int ret = syscall(__NR_unlinkat, dirfd, redirect_path, flags);
     FREE(redirect_path, pathname);
     return ret;
@@ -243,6 +331,9 @@ HOOK_DEF(int, unlinkat, int dirfd, const char *pathname, int flags) {
 // int unlink(const char *pathname);
 HOOK_DEF(int, unlink, const char *pathname) {
     const char *redirect_path = match_redirected_path(pathname);
+    if (isReadOnlyPath(redirect_path)) {
+        return -1;
+    }
     int ret = syscall(__NR_unlink, redirect_path);
     FREE(redirect_path, pathname);
     return ret;
@@ -262,6 +353,9 @@ HOOK_DEF(int, symlinkat, const char *oldpath, int newdirfd, const char *newpath)
 HOOK_DEF(int, symlink, const char *oldpath, const char *newpath) {
     const char *redirect_path_old = match_redirected_path(oldpath);
     const char *redirect_path_new = match_redirected_path(newpath);
+    if (isReadOnlyPath(redirect_path_old) || isReadOnlyPath(newpath)) {
+        return -1;
+    }
     int ret = syscall(__NR_symlink, redirect_path_old, redirect_path_new);
     FREE(redirect_path_old, oldpath);
     FREE(redirect_path_new, newpath);
@@ -274,6 +368,9 @@ HOOK_DEF(int, linkat, int olddirfd, const char *oldpath, int newdirfd, const cha
          int flags) {
     const char *redirect_path_old = match_redirected_path(oldpath);
     const char *redirect_path_new = match_redirected_path(newpath);
+    if (isReadOnlyPath(redirect_path_old) || isReadOnlyPath(newpath)) {
+        return -1;
+    }
     int ret = syscall(__NR_linkat, olddirfd, redirect_path_old, newdirfd, redirect_path_new, flags);
     FREE(redirect_path_old, oldpath);
     FREE(redirect_path_new, newpath);
@@ -302,6 +399,9 @@ HOOK_DEF(int, utimes, const char *pathname, const struct timeval *tvp) {
 // int access(const char *pathname, int mode);
 HOOK_DEF(int, access, const char *pathname, int mode) {
     const char *redirect_path = match_redirected_path(pathname);
+    if (mode & W_OK && isReadOnlyPath(redirect_path)) {
+        return -1;
+    }
     int ret = syscall(__NR_access, redirect_path, mode);
     FREE(redirect_path, pathname);
     return ret;
@@ -311,6 +411,9 @@ HOOK_DEF(int, access, const char *pathname, int mode) {
 // int chmod(const char *path, mode_t mode);
 HOOK_DEF(int, chmod, const char *pathname, mode_t mode) {
     const char *redirect_path = match_redirected_path(pathname);
+    if (isReadOnlyPath(redirect_path)) {
+        return -1;
+    }
     int ret = syscall(__NR_chmod, redirect_path, mode);
     FREE(redirect_path, pathname);
     return ret;
@@ -445,6 +548,9 @@ HOOK_DEF(int, __open, const char *pathname, int flags, int mode) {
 // int lchown(const char *pathname, uid_t owner, gid_t group);
 HOOK_DEF(int, lchown, const char *pathname, uid_t owner, gid_t group) {
     const char *redirect_path = match_redirected_path(pathname);
+    if (isReadOnlyPath(redirect_path)) {
+        return -1;
+    }
     int ret = syscall(__NR_lchown, redirect_path, owner, group);
     FREE(redirect_path, pathname);
     return ret;
@@ -453,25 +559,19 @@ HOOK_DEF(int, lchown, const char *pathname, uid_t owner, gid_t group) {
 // int (*origin_execve)(const char *pathname, char *const argv[], char *const envp[]);
 HOOK_DEF(int, execve, const char *pathname, char *const argv[], char *const envp[]) {
 
-    /**
-     * TODO (RUC):
-     * Fix the LD_PRELOAD.
-     * Now we just fill it.
-     */
-    if (!strcmp(pathname, "dex2oat")) {
-        for (int i = 0; envp[i] != NULL; ++i) {
-            if (!strncmp(envp[i], "LD_PRELOAD=", 11)) {
-                const_cast<char **>(envp)[i] = getenv("LD_PRELOAD");
-            }
-        }
-    }
-
-    LOGD("execve: %s, LD_PRELOAD: %s.", pathname, getenv("LD_PRELOAD"));
     for (int i = 0; argv[i] != NULL; ++i) {
-        LOGD("argv[%i] : %s", i, argv[i]);
+        LOGE("argv[%i] : %s", i, argv[i]);
     }
     for (int i = 0; envp[i] != NULL; ++i) {
-        LOGD("envp[%i] : %s", i, envp[i]);
+        if (!strncmp(envp[i], "LD_PRELOAD=", 11)) {
+            char preload_path[200];
+            sprintf(preload_path, "LD_PRELOAD=%s:%s", gVars.selfSoPath, envp[i] + 11);
+            const_cast<char **>(envp)[i] = preload_path;
+            break;
+        }
+    }
+    for (int i = 0; envp[i] != NULL; ++i) {
+        LOGE("envp[%i] : %s", i, envp[i]);
     }
     const char *redirect_path = match_redirected_path(pathname);
     int ret = syscall(__NR_execve, redirect_path, argv, envp);
@@ -518,15 +618,19 @@ HOOK_DEF(void*, dlsym, void *handle, char *symbol) {
 // int kill(pid_t pid, int sig);
 HOOK_DEF(int, kill, pid_t pid, int sig) {
     LOGD(">>>>> kill >>> pid: %d, sig: %d.", pid, sig);
-    extern JavaVM *g_vm;
-    extern jclass g_jclass;
+    extern JavaVM *gVm;
+    extern jclass gClass;
     JNIEnv *env = NULL;
-    g_vm->GetEnv((void **) &env, JNI_VERSION_1_4);
-    g_vm->AttachCurrentThread(&env, NULL);
-    jmethodID method = env->GetStaticMethodID(g_jclass, "onKillProcess", "(II)V");
-    env->CallStaticVoidMethod(g_jclass, method, pid, sig);
+    gVm->GetEnv((void **) &env, JNI_VERSION_1_4);
+    gVm->AttachCurrentThread(&env, NULL);
+    jmethodID method = env->GetStaticMethodID(gClass, "onKillProcess", "(II)V");
+    env->CallStaticVoidMethod(gClass, method, pid, sig);
     int ret = syscall(__NR_kill, pid, sig);
     return ret;
+}
+
+HOOK_DEF(pid_t, vfork) {
+    return fork();
 }
 
 __END_DECLS
@@ -563,33 +667,32 @@ void hook_dlopen(int api_level) {
 }
 
 
-void IOUniformer::startUniformer(int api_level) {
+void IOUniformer::startUniformer(int api_level, int preview_api_level) {
+    gVars.hooked_process = true;
+    HOOK_SYMBOL(RTLD_DEFAULT, vfork);
     HOOK_SYMBOL(RTLD_DEFAULT, kill);
     HOOK_SYMBOL(RTLD_DEFAULT, __getcwd);
-    HOOK_SYMBOL(RTLD_DEFAULT, chdir);
     HOOK_SYMBOL(RTLD_DEFAULT, truncate);
     HOOK_SYMBOL(RTLD_DEFAULT, __statfs64);
-    HOOK_SYMBOL(RTLD_DEFAULT, execve); // *
-    HOOK_SYMBOL(RTLD_DEFAULT, stat);   // *
-    HOOK_SYMBOL(RTLD_DEFAULT, access); // *
-    HOOK_SYMBOL(RTLD_DEFAULT, readlink);
-    /**
-     * Using MSHook to Hook `unlink` will produce crash(ARM/THUMB).
-     * MSHook BUG???
-     * So we use the new hook lib.
-     */
-    HOOK_SYMBOL(RTLD_DEFAULT, unlink);
+    HOOK_SYMBOL(RTLD_DEFAULT, execve);
     HOOK_SYMBOL(RTLD_DEFAULT, __open);
-    HOOK_SYMBOL(RTLD_DEFAULT, mkdir);
-    HOOK_SYMBOL(RTLD_DEFAULT, chmod);
-    HOOK_SYMBOL(RTLD_DEFAULT, lstat);
-    HOOK_SYMBOL(RTLD_DEFAULT, link);
-    HOOK_SYMBOL(RTLD_DEFAULT, symlink);
-    HOOK_SYMBOL(RTLD_DEFAULT, mknod);
-    HOOK_SYMBOL(RTLD_DEFAULT, rmdir);
-    HOOK_SYMBOL(RTLD_DEFAULT, chown);
-    HOOK_SYMBOL(RTLD_DEFAULT, rename);
-    HOOK_SYMBOL(RTLD_DEFAULT, utimes);
+    if ((api_level < 25) || (api_level == 25 && preview_api_level == 0)) {
+        HOOK_SYMBOL(RTLD_DEFAULT, utimes);
+        HOOK_SYMBOL(RTLD_DEFAULT, mkdir);
+        HOOK_SYMBOL(RTLD_DEFAULT, chmod);
+        HOOK_SYMBOL(RTLD_DEFAULT, lstat);
+        HOOK_SYMBOL(RTLD_DEFAULT, link);
+        HOOK_SYMBOL(RTLD_DEFAULT, symlink);
+        HOOK_SYMBOL(RTLD_DEFAULT, mknod);
+        HOOK_SYMBOL(RTLD_DEFAULT, rmdir);
+        HOOK_SYMBOL(RTLD_DEFAULT, chown);
+        HOOK_SYMBOL(RTLD_DEFAULT, rename);
+        HOOK_SYMBOL(RTLD_DEFAULT, stat);
+        HOOK_SYMBOL(RTLD_DEFAULT, chdir);
+        HOOK_SYMBOL(RTLD_DEFAULT, access);
+        HOOK_SYMBOL(RTLD_DEFAULT, readlink);
+        HOOK_SYMBOL(RTLD_DEFAULT, unlink);
+    }
     HOOK_SYMBOL(RTLD_DEFAULT, fstatat);
     HOOK_SYMBOL(RTLD_DEFAULT, fchmodat);
     HOOK_SYMBOL(RTLD_DEFAULT, symlinkat);
@@ -603,8 +706,7 @@ void IOUniformer::startUniformer(int api_level) {
     HOOK_SYMBOL(RTLD_DEFAULT, renameat);
     HOOK_SYMBOL(RTLD_DEFAULT, fchownat);
     HOOK_SYMBOL(RTLD_DEFAULT, mknodat);
-    hook_dlopen(api_level);
-    HOOK_SYMBOL(RTLD_DEFAULT, dlsym);
+//    hook_dlopen(api_level);
 
 #if defined(__i386__) || defined(__x86_64__)
     // Do nothing

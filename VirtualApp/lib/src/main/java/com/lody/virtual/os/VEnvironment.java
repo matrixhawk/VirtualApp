@@ -41,8 +41,7 @@ public class VEnvironment {
                 FileUtils.chmod(DATA_DIRECTORY.getAbsolutePath(), FileUtils.FileMode.MODE_755);
                 FileUtils.chmod(getDataAppDirectory().getAbsolutePath(), FileUtils.FileMode.MODE_755);
             } catch (Exception e) {
-                // ignore
-                VLog.e(TAG, "chmod dir", e);
+                e.printStackTrace();
             }
         }
     }
@@ -84,8 +83,20 @@ public class VEnvironment {
         return new File(getSystemSecureDirectory(), "account-list.ini");
     }
 
+    public static File getDeviceInfoFile() {
+        return new File(getSystemSecureDirectory(), "device-info.ini");
+    }
+
     public static File getPackageListFile() {
         return new File(getSystemSecureDirectory(), "packages.ini");
+    }
+
+    /**
+     *
+     * @return Virtual storage config file
+     */
+    public static File getVSConfigFile() {
+        return new File(getSystemSecureDirectory(), "vss.ini");
     }
 
     public static File getBakPackageListFile() {
@@ -109,12 +120,24 @@ public class VEnvironment {
         return ensureCreated(new File(getDataAppDirectory(), packageName));
     }
 
+    public static File getPackageCacheFile(String packageName) {
+        return new File(getDataAppPackageDirectory(packageName), "package.ini");
+    }
+
+    public static File getSignatureFile(String packageName) {
+        return new File(getDataAppPackageDirectory(packageName), "signature.ini");
+    }
+
     public static File getUserSystemDirectory() {
         return USER_DIRECTORY;
     }
 
     public static File getUserSystemDirectory(int userId) {
         return new File(USER_DIRECTORY, String.valueOf(userId));
+    }
+
+    public static File getWifiMacFile(int userId) {
+        return new File(getUserSystemDirectory(userId), "wifiMacAddress");
     }
 
     public static File getDataDirectory() {

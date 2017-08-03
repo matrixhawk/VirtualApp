@@ -51,6 +51,8 @@ interface IActivityManager {
 
     void appDoneExecuting();
 
+    int startActivities(in Intent[] intents, in String[] resolvedTypes, in IBinder token, in Bundle options, in int userId);
+
     int startActivity(in Intent intent, in ActivityInfo info, in IBinder resultTo, in Bundle options, String resultWho, int requestCode, int userId);
 
     void onActivityCreated(in ComponentName component, in ComponentName caller, in IBinder token, in Intent intent, in String affinity, int taskId, int launchMode, int flags);
@@ -78,7 +80,7 @@ interface IActivityManager {
     boolean stopServiceToken(in ComponentName className, in IBinder token, int startId, int userId);
 
     void setServiceForeground(in ComponentName className, in IBinder token, int id,
-                            in Notification notification, boolean keepNotification, int userId);
+                            in Notification notification, boolean removeNotification, int userId);
 
     int bindService(in IBinder caller, in IBinder token, in Intent service,
                     String resolvedType, in IServiceConnection connection, int flags, int userId);
@@ -103,9 +105,9 @@ interface IActivityManager {
 
     void removePendingIntent(IBinder binder);
 
+    String getPackageForIntentSender(IBinder binder);
+
     void processRestarted(in String packageName, in String processName, int userId);
 
     void broadcastFinish(in PendingResultData res);
-
-    Intent dispatchStickyBroadcast(in IntentFilter filter);
 }
